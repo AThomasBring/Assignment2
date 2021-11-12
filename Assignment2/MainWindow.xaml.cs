@@ -3,28 +3,33 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Navigation;
-using System.Windows.Shapes;
 using System.Xml.Linq;
 
 namespace Assignment2
 {
     public class Feed
     {
+        private static HttpClient http = new HttpClient();
         public string Url;
         public string Title;
-        public XDocument Document;
+
+        //because we always load a document associated with a feed, we thought it made sense to put this as an instance method.
+        public async Task<XDocument> LoadDocumentAsync()
+        {
+            // This is just to simulate a slow/large data transfer and make testing easier.
+            // Remove it if you want to.
+            await Task.Delay(1000);
+            var response = await http.GetAsync(this.Url);
+            response.EnsureSuccessStatusCode();
+            var stream = await response.Content.ReadAsStreamAsync();
+            var feedDocument = XDocument.Load(stream);
+            return feedDocument;
+        }
     }
-    public class Item
+    public class Article
     {
         public Feed Feed;
         public string Title;
@@ -35,7 +40,7 @@ namespace Assignment2
     public partial class MainWindow : Window
     {
         private Thickness spacing = new Thickness(5);
-        private HttpClient http = new HttpClient();
+        
         // We will need these as instance variables to access in event handlers.
         private TextBox addFeedTextBox;
         private Button addFeedButton;
@@ -43,7 +48,6 @@ namespace Assignment2
         private Button loadArticlesButton;
         private StackPanel articlePanel;
         public List<Feed> feeds = new List<Feed>();
-        private string url;
 
         public MainWindow()
         {
@@ -51,7 +55,7 @@ namespace Assignment2
             Start();
         }
 
-        private async Task Start()
+        private void Start()
         {
             // Window options
             Title = "Feed Reader";
@@ -98,7 +102,7 @@ namespace Assignment2
             };
             grid.Children.Add(addFeedButton);
             Grid.SetColumn(addFeedButton, 2);
-            addFeedButton.Click += HandleAddFeedClick;
+            addFeedButton.Click += HandleAddFeedClickAsync;
 
             var selectFeedLabel = new Label
             {
@@ -129,7 +133,7 @@ namespace Assignment2
             grid.Children.Add(loadArticlesButton);
             Grid.SetRow(loadArticlesButton, 1);
             Grid.SetColumn(loadArticlesButton, 2);
-            loadArticlesButton.Click += HandleLoadArticlesButtonClick;
+            loadArticlesButton.Click += HandleLoadArticlesClickAsync;
 
             articlePanel = new StackPanel
             {
@@ -141,70 +145,98 @@ namespace Assignment2
             Grid.SetColumnSpan(articlePanel, 3);
 
             var userInput = addFeedTextBox.Text;
-
-            // These are just placeholders.
-            // Replace them with your own code that shows actual articles.
            
         }
 
-        private void HandleLoadArticlesButtonClick(object sender, RoutedEventArgs e)
+        private async void HandleAddFeedClickAsync(object sender, RoutedEventArgs e)
         {
-            loadArticlesButton.IsEnabled = false;
+            addFeedButton.IsEnabled = false;
 
+            await Task.Delay(1000);
+
+            var url = addFeedTextBox.Text;
+            var feed = await CreateFeedAsync(url);
+            feeds.Add(feed);
+
+            var newItem = new ComboBoxItem();
+            newItem.Content = feed.Title;
+            newItem.Tag = feed;
+
+            selectFeedComboBox.Items.Add(newItem);
+            addFeedButton.IsEnabled = true;
+
+        }
+
+        private async void HandleLoadArticlesClickAsync(object sender, RoutedEventArgs e)
+        {
             articlePanel.Children.Clear();
 
-            if (selectFeedComboBox.SelectedIndex == 0)
-            {
-                ShowAllFeeds();
-            }
+            //index of 0 is the "show all feeds" option
+            if (selectFeedComboBox.SelectedIndex == 0) {
+
+                //all articles to load be loaded
+                var allArticlesTasks = feeds.Select(LoadArticlesAsync).ToList();
+
+                //results will be stored here
+                var allArticles = new List<Article>();
+
+                while (allArticlesTasks.Count > 0)
+                {
+                    var task = await Task.WhenAny(allArticlesTasks);
+                    allArticles.AddRange(await task);
+                    allArticlesTasks.Remove(task);
+                }
+                //sort & display
+                ShowArticles(allArticles.OrderByDescending(x => x.DateTime).ToList());
+            } 
             else
             {
-                var items = GetItems(feeds[selectFeedComboBox.SelectedIndex - 1]).ToList();
-
-                foreach (Item item in items)
-                {
-                    var articlePlaceholder = new StackPanel
-                    {
-                        Orientation = Orientation.Vertical,
-                        Margin = spacing
-                    };
-                    articlePanel.Children.Add(articlePlaceholder);
-
-                    var articleTitle = new TextBlock
-                    {
-                        Text = item.DateTime + " - " + item.Title,
-                        FontWeight = FontWeights.Bold,
-                        TextTrimming = TextTrimming.CharacterEllipsis
-                    };
-                    articlePlaceholder.Children.Add(articleTitle);
-
-                    var articleWebsite = new TextBlock
-                    {
-                        Text = item.Feed.Title
-                    };
-                    articlePlaceholder.Children.Add(articleWebsite);
-                }
+                //the first item in our combobox contains the "show all feeds" text, so we need to subtract 1 from the selected index for it to match our list of feeds.
+                var selectedFeed = feeds[selectFeedComboBox.SelectedIndex - 1];
+                var items = await LoadArticlesAsync(selectedFeed);
+                ShowArticles(items);
             }
         }
 
-        private async void ShowAllFeeds()
+        private async Task<Feed> CreateFeedAsync(string url)
         {
-            var allItems = new List<Item>();
+            var feed = new Feed();
+            feed.Url = url;
+            feed.Title = (await feed.LoadDocumentAsync()).Descendants("title").First().Value;
 
-            var feedUrl = feeds.Select(f => f.Url).ToList();
-            var feedTasks = feedUrl.Select(GetFeed).ToList();
+            return feed;
+        }
 
-            while (feedTasks.Count > 0)
+        private async Task<IEnumerable<Article>> LoadArticlesAsync(Feed feed)
+        {
+            //we disable button while loading
+            loadArticlesButton.IsEnabled = false;
+
+            //the article data is in the <item> tags of the Xdocument
+            var itemsXElements = (await feed.LoadDocumentAsync()).Descendants("item");
+
+            //parse each item and add to list of articles
+            var articles = new List<Article>();
+            foreach (var xElement in itemsXElements)
             {
-                var task = await Task.WhenAny(feedTasks);
-                allItems.AddRange(GetItems(await task));
-                feedTasks.Remove(task);
+                var article = new Article
+                {
+                    Feed = feed,
+                    Title = xElement.Descendants("title").First().Value,
+                    DateTime = DateTime.ParseExact(xElement.Descendants("pubDate").First().Value.Substring(0, 25),
+                        "ddd, dd MMM yyyy HH:mm:ss", CultureInfo.InvariantCulture)
+                };
+                articles.Add(article);
             }
 
-            allItems = allItems.OrderByDescending(x => x.DateTime).ToList();
+            loadArticlesButton.IsEnabled = true;
 
+            return articles;
+        }
 
-            foreach (Item item in allItems)
+        private void ShowArticles(IEnumerable<Article> articles)
+        {
+            foreach (Article article in articles)
             {
                 var articlePlaceholder = new StackPanel
                 {
@@ -215,7 +247,7 @@ namespace Assignment2
 
                 var articleTitle = new TextBlock
                 {
-                    Text = item.DateTime + " - " + item.Title,
+                    Text = article.DateTime + " - " + article.Title,
                     FontWeight = FontWeights.Bold,
                     TextTrimming = TextTrimming.CharacterEllipsis
                 };
@@ -223,81 +255,10 @@ namespace Assignment2
 
                 var articleWebsite = new TextBlock
                 {
-                    Text = item.Feed.Title
+                    Text = article.Feed.Title
                 };
                 articlePlaceholder.Children.Add(articleWebsite);
             }
-        }
-
-        private void HandleAddFeedClick(object sender, RoutedEventArgs e)
-        {
-            addFeedButton.IsEnabled = false;
-            AddFeed();
-        }
-
-
-        private async Task<XDocument> LoadDocumentAsync(string url)
-        {
-            // This is just to simulate a slow/large data transfer and make testing easier.
-            // Remove it if you want to.
-            await Task.Delay(1000);
-            var response = await http.GetAsync(url);
-            response.EnsureSuccessStatusCode();
-            var stream = await response.Content.ReadAsStreamAsync();
-            var feed = XDocument.Load(stream);
-            return feed;
-        }
-
-        private async void AddFeed()
-        {
-            await Task.Delay(1000);
-
-            var url = addFeedTextBox.Text;
-            var feed = await GetFeed(url);
-            feeds.Add( feed);
-
-            var newItem = new ComboBoxItem();
-            newItem.Content = feed.Title;
-            newItem.Tag = feed;
-
-            selectFeedComboBox.Items.Add(newItem);
-            addFeedButton.IsEnabled = true;
-
-        }
-        private async Task<Feed> GetFeed(string url)
-        {
-
-            var documentTask = LoadDocumentAsync(url);
-            var document = await documentTask;
-
-            var feed = new Feed();
-
-            feed.Title = document.Descendants("title").First().Value;
-            feed.Url = url;
-            feed.Document = document;
-
-            return feed;
-        }
-
-        private IEnumerable<Item> GetItems(Feed feed)
-        {
-
-            var itemsXElements = feed.Document.Descendants("item");
-            var items = new List<Item>();
-
-            foreach (var xElement in itemsXElements)
-            {
-                var item = new Item
-                {
-                    Feed = feed,
-                    Title = xElement.Descendants("title").First().Value,
-                    DateTime = DateTime.ParseExact(xElement.Descendants("pubDate").First().Value.Substring(0, 25),
-                        "ddd, dd MMM yyyy HH:mm:ss", CultureInfo.InvariantCulture)
-                };
-                items.Add(item);
-            }
-
-            return items;
         }
     }
 }
